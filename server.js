@@ -19,7 +19,7 @@ app.disable('x-powered-by');
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
 app.use('/api/', limiter);
 
-// --- BANCO DE DADOS (Novas colunas: ip, plano_ativo, tempo_restante) ---
+// --- BANCO DE DADOS (Com IP, Plano e Tempo) ---
 const db = new sqlite3.Database('./bigroom.db', (err) => {
     if (!err) {
         console.log("📦 Banco de dados conectado.");
@@ -38,6 +38,7 @@ const db = new sqlite3.Database('./bigroom.db', (err) => {
     }
 });
 
+// Controle de IP (1 conta por semana)
 const ipsCadastrados = new Map(); 
 
 function gerarCodigo() {
@@ -49,9 +50,10 @@ function gerarCodigo() {
     return codigo;
 }
 
+// --- ROTAS DO USUÁRIO ---
 app.post('/api/cadastro', async (req, res) => {
     const { nome, email, senha } = req.body;
-    const ip = req.ip || req.connection.remoteAddress; // Captura o IP real
+    const ip = req.ip || req.connection.remoteAddress;
 
     if (!nome || !email || !senha) return res.status(400).json({ erro: "Preencha todos os campos." });
 
@@ -61,6 +63,7 @@ app.post('/api/cadastro', async (req, res) => {
         return res.status(400).json({ erro: "Por favor, use um e-mail válido (Gmail, Hotmail, Outlook, etc)." });
     }
 
+    // Bloqueio de 1 conta por semana por IP
     const ultimoCadastro = ipsCadastrados.get(ip);
     if (ultimoCadastro && (Date.now() - ultimoCadastro < 7 * 24 * 60 * 60 * 1000)) {
         return res.status(429).json({ erro: "Você já criou uma conta recentemente. Aguarde 7 dias." });
@@ -138,7 +141,7 @@ app.post('/api/descontar', (req, res) => {
     });
 });
 
-// --- ADMINISTRAÇÃO (JWT) ---
+// --- ROTAS DO ADMINISTRADOR ---
 const JWT_SECRET = "bigroom_chave_secreta_super_segura_2026";
 const SENHA_ADMIN_CRIACAO = "ComandoGame123";
 
@@ -183,11 +186,9 @@ app.post('/api/admin/banir', verificarToken, (req, res) => {
     });
 });
 
-// NOVA ROTA: Gerenciar Tempo de Jogo do Usuário
 app.post('/api/admin/tempo', verificarToken, (req, res) => {
     const { idUsuario, minutos, plano } = req.body;
     if (minutos === 0) {
-        // Se o admin zerar, remove o plano ativo
         db.run(`UPDATE usuarios SET tempo_restante = 0, plano_ativo = 'Nenhum' WHERE id = ?`, [idUsuario], function(err) {
             if (err) return res.status(500).json({ erro: "Erro ao remover tempo." });
             res.json({ mensagem: "Sessão encerrada e tempo removido!" });
@@ -200,6 +201,7 @@ app.post('/api/admin/tempo', verificarToken, (req, res) => {
     }
 });
 
+// --- SERVIDOR E SOCKET ---
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, '../')));
@@ -213,5 +215,5 @@ io.on('connection', (socket) => {
 });
 
 server.listen(3000, () => {
-    console.log('🛡️ Servidor BIG-Room com Controle de Sessão rodando em http://localhost:3000');
+    console.log('🛡️ Servidor BIG-Room com Controle Total rodando em http://localhost:3000');
 });
