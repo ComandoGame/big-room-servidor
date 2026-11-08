@@ -6,15 +6,16 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
+const cors = require('cors'); // <-- NOVO
 
 const app = express();
 
-// --- CORREÇÃO DO ERRO NO RENDER ---
-app.set('trust proxy', 1); // Permite que o Render identifique o IP real do usuário
+// --- CORREÇÃO DO ERRO NO RENDER (Proxy) ---
+app.set('trust proxy', 1); 
 
+// --- SEGURANÇA E CORS ---
+app.use(cors()); // <-- NOVO: Permite que o HTML local se conecte ao servidor na nuvem
 app.use(express.json()); 
-
-// --- SEGURANÇA ---
 app.use(helmet({ contentSecurityPolicy: false })); 
 app.disable('x-powered-by');
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 50, message: "Muitas requisições." });
@@ -63,7 +64,6 @@ app.post('/api/login', (req, res) => {
     });
 });
 
-// Rota para checar saldo
 app.get('/api/saldo/:id', (req, res) => {
     db.get(`SELECT saldo FROM usuarios WHERE id = ?`, [req.params.id], (err, row) => {
         if (err || !row) return res.status(404).json({ erro: "Usuário não encontrado." });
@@ -71,7 +71,7 @@ app.get('/api/saldo/:id', (req, res) => {
     });
 });
 
-// --- SERVIDOR E SOCKET.IO (Jogo) ---
+// --- SERVIDOR E SOCKET.IO ---
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, '../')));
