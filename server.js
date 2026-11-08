@@ -22,7 +22,7 @@ app.use(cookieParser());
 app.use(helmet({ contentSecurityPolicy: false }));
 app.disable('x-powered-by');
 
-// CONFIGURAÇÃO DE CHAVES
+// CONFIGURAÇÕES
 const FP_SECRET_API_KEY = "COLE_SUA_SECRET_KEY_AQUI"; 
 const JWT_SECRET = "bigroom_chave_secreta_super_segura_2026";
 const fpClient = new FingerprintServerApiClient({ apiKey: FP_SECRET_API_KEY, region: Region.Global });
@@ -40,9 +40,9 @@ const db = new sqlite3.Database('./bigroom.db', (err) => {
         )`);
         db.run(`CREATE TABLE IF NOT EXISTS banidos_ip (ip TEXT PRIMARY KEY)`);
         db.run(`CREATE TABLE IF NOT EXISTS banidos_hardware (visitor_id TEXT PRIMARY KEY)`);
-        // TABELA DE CHAT (CONVERSAS)
-        db.run(`CREATE TABLE IF NOT EXISTS conversas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER, remetente TEXT, mensagem TEXT, data_envio DATETIME DEFAULT CURRENT_TIMESTAMP
+        // TABELA DE MENSAGENS (Sem sistema de chat complexo, apenas o ticket)
+        db.run(`CREATE TABLE IF NOT EXISTS mensagens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT, email TEXT, mensagem TEXT, data_envio DATETIME DEFAULT CURRENT_TIMESTAMP
         )`);
     }
 });
@@ -131,20 +131,14 @@ app.post('/api/descontar', autenticarUser, (req, res) => {
     });
 });
 
-// --- SISTEMA DE CHAT (CONTATO) ---
-app.post('/api/contato', autenticarUser, (req, res) => {
-    const { mensagem } = req.body;
-    if (!mensagem) return res.status(400).json({ erro: "Escreva uma mensagem." });
-    db.run(`INSERT INTO conversas (usuario_id, remetente, mensagem) VALUES (?, 'user', ?)`, [req.userId, mensagem], function(err) {
-        if (err) return res.status(500).json({ erro: "Erro ao salvar." });
-        res.json({ mensagem: "Enviado!" });
-    });
-});
+// --- ROTA DE CONTATO (PÚBLICA) ---
+app.post('/api/contato', (req, res) => {
+    const { nome, email, mensagem } = req.body;
+    if (!nome || !email || !mensagem) return res.status(400).json({ erro: "Preencha todos os campos." });
 
-app.get('/api/minhas-mensagens', autenticarUser, (req, res) => {
-    db.all(`SELECT remetente, mensagem, data_envio FROM conversas WHERE usuario_id = ? ORDER BY data_envio ASC`, [req.userId], (err, rows) => {
-        if (err) return res.status(500).json({ erro: "Erro." });
-        res.json({ conversas: rows });
+    db.run(`INSERT INTO mensagens (nome, email, mensagem) VALUES (?, ?, ?)`, [nome, email, mensagem], function(err) {
+        if (err) return res.status(500).json({ erro: "Erro ao salvar mensagem." });
+        res.json({ mensagem: "Mensagem enviada com sucesso! Responderemos no seu e-mail." });
     });
 });
 
@@ -186,20 +180,8 @@ app.post('/api/admin/tempo', verificarAdmin, (req, res) => {
     if (minutos === 0) db.run(`UPDATE usuarios SET tempo_restante = 0, plano_ativo = 'Nenhum' WHERE id = ?`, [idUsuario], () => res.json({ mensagem: "Zerado!" }));
     else db.run(`UPDATE usuarios SET tempo_restante = tempo_restante + ?, plano_ativo = ? WHERE id = ?`, [minutos, plano, idUsuario], () => res.json({ mensagem: "Tempo adicionado!" }));
 });
-
-// NOVAS ROTAS DO ADMIN PARA O CHAT
-app.post('/api/admin/conversas', verificarAdmin, (req, res) => {
-    db.all(`SELECT c.*, u.nome FROM conversas c JOIN usuarios u ON c.usuario_id = u.id ORDER BY c.data_envio ASC`, [], (err, rows) => {
-        if (err) return res.status(500).json({ erro: "Erro." });
-        res.json({ conversas: rows });
-    });
-});
-app.post('/api/admin/responder', verificarAdmin, (req, res) => {
-    const { idUsuario, mensagem } = req.body;
-    db.run(`INSERT INTO conversas (usuario_id, remetente, mensagem) VALUES (?, 'admin', ?)`, [idUsuario, mensagem], function(err) {
-        if (err) return res.status(500).json({ erro: "Erro ao responder." });
-        res.json({ mensagem: "Resposta enviada!" });
-    });
+app.post('/api/admin/mensagens', verificarAdmin, (req, res) => {
+    db.all(`SELECT * FROM mensagens ORDER BY data_envio DESC`, [], (err, rows) => res.json({ mensagens: rows }));
 });
 
 // --- SOCKET E SERVIDOR ---
@@ -208,4 +190,4 @@ const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, '../')));
 io.on('connection', (socket) => { socket.on('iniciar_maquina', () => setTimeout(() => socket.emit('maquina_pronta'), 3000)); });
 
-server.listen(3000, () => console.log('🛡️ Servidor com Chat rodando na porta 3000'));
+server.listen(3000, () => console.log('🛡️ Servidor BIG-Room rodando na porta 3000'));
