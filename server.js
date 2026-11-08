@@ -19,7 +19,7 @@ app.disable('x-powered-by');
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
 app.use('/api/', limiter);
 
-// --- BANCO DE DADOS (Nova coluna: codigo_conta) ---
+// --- BANCO DE DADOS (Novas colunas: ip, plano_ativo, tempo_restante) ---
 const db = new sqlite3.Database('./bigroom.db', (err) => {
     if (!err) {
         console.log("📦 Banco de dados conectado.");
@@ -30,15 +30,16 @@ const db = new sqlite3.Database('./bigroom.db', (err) => {
             email TEXT UNIQUE NOT NULL,
             senha TEXT NOT NULL,
             saldo REAL DEFAULT 0.00,
-            banido INTEGER DEFAULT 0
+            banido INTEGER DEFAULT 0,
+            ip TEXT DEFAULT 'Desconhecido',
+            plano_ativo TEXT DEFAULT 'Nenhum',
+            tempo_restante INTEGER DEFAULT 0
         )`);
     }
 });
 
-// Memória temporária para limitar criação por IP (1 por semana)
 const ipsCadastrados = new Map(); 
 
-// Função para gerar código tipo "BR-XXXXX"
 function gerarCodigo() {
     const caracteres = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let codigo = 'BR-';
@@ -48,33 +49,29 @@ function gerarCodigo() {
     return codigo;
 }
 
-// --- ROTA DE CADASTRO (Com validações) ---
 app.post('/api/cadastro', async (req, res) => {
     const { nome, email, senha } = req.body;
-    const ip = req.ip;
+    const ip = req.ip || req.connection.remoteAddress; // Captura o IP real
 
-    // 1. Validação básica
     if (!nome || !email || !senha) return res.status(400).json({ erro: "Preencha todos os campos." });
 
-    // 2. Bloqueia domínios falsos comuns
     const dominiosPermitidos = ['gmail.com', 'hotmail.com', 'outlook.com', 'yahoo.com', 'icloud.com'];
     const dominio = email.split('@')[1];
     if (!dominiosPermitidos.includes(dominio)) {
         return res.status(400).json({ erro: "Por favor, use um e-mail válido (Gmail, Hotmail, Outlook, etc)." });
     }
 
-    // 3. Verifica limite de 1 conta por semana por IP
     const ultimoCadastro = ipsCadastrados.get(ip);
     if (ultimoCadastro && (Date.now() - ultimoCadastro < 7 * 24 * 60 * 60 * 1000)) {
-        return res.status(429).json({ erro: "Você já criou uma conta recentemente. Aguarde 7 dias para criar outra." });
+        return res.status(429).json({ erro: "Você já criou uma conta recentemente. Aguarde 7 dias." });
     }
 
     try {
         const senhaHash = await bcrypt.hash(senha, 10);
         const codigoConta = gerarCodigo();
 
-        db.run(`INSERT INTO usuarios (codigo_conta, nome, email, senha, saldo) VALUES (?, ?, ?, ?, ?)`, 
-            [codigoConta, nome, email, senhaHash, 5.00],
+        db.run(`INSERT INTO usuarios (codigo_conta, nome, email, senha, saldo, ip) VALUES (?, ?, ?, ?, ?, ?)`, 
+            [codigoConta, nome, email, senhaHash, 5.00, ip],
             function(err) {
                 if (err) {
                     if (err.message.includes('UNIQUE constraint failed: usuarios.email')) {
@@ -83,7 +80,6 @@ app.post('/api/cadastro', async (req, res) => {
                     return res.status(500).json({ erro: "Erro interno ao criar conta." });
                 }
                 
-                // Salva o IP no cache para bloquear novas contas por 7 dias
                 ipsCadastrados.set(ip, Date.now());
 
                 res.json({ 
@@ -97,7 +93,6 @@ app.post('/api/cadastro', async (req, res) => {
     }
 });
 
-// --- ROTA DE LOGIN (Retorna o código da conta também) ---
 app.post('/api/login', (req, res) => {
     const { email, senha } = req.body;
     db.get(`SELECT * FROM usuarios WHERE email = ?`, [email], async (err, usuario) => {
@@ -113,22 +108,22 @@ app.post('/api/login', (req, res) => {
                 id: usuario.id, 
                 codigo_conta: usuario.codigo_conta, 
                 nome: usuario.nome, 
-                saldo: usuario.saldo 
+                saldo: usuario.saldo,
+                plano_ativo: usuario.plano_ativo,
+                tempo_restante: usuario.tempo_restante
             } 
         });
     });
 });
 
-// Rota de saldo (Verifica banimento)
 app.get('/api/saldo/:id', (req, res) => {
-    db.get(`SELECT saldo, banido FROM usuarios WHERE id = ?`, [req.params.id], (err, row) => {
+    db.get(`SELECT saldo, banido, tempo_restante FROM usuarios WHERE id = ?`, [req.params.id], (err, row) => {
         if (err || !row) return res.status(404).json({ erro: "Usuário não encontrado." });
         if (row.banido === 1) return res.status(403).json({ erro: "BANIDO" });
-        res.json({ saldo: row.saldo });
+        res.json({ saldo: row.saldo, tempo_restante: row.tempo_restante });
     });
 });
 
-// Rota para descontar saldo
 app.post('/api/descontar', (req, res) => {
     const { idUsuario, valor } = req.body;
     db.get(`SELECT saldo FROM usuarios WHERE id = ?`, [idUsuario], (err, user) => {
@@ -165,7 +160,7 @@ function verificarToken(req, res, next) {
 }
 
 app.post('/api/admin/usuarios', verificarToken, (req, res) => {
-    db.all(`SELECT id, codigo_conta, nome, email, saldo, banido FROM usuarios`, [], (err, rows) => {
+    db.all(`SELECT id, codigo_conta, nome, email, saldo, banido, ip, plano_ativo, tempo_restante FROM usuarios`, [], (err, rows) => {
         if (err) return res.status(500).json({ erro: "Erro ao buscar." });
         res.json({ usuarios: rows });
     });
@@ -188,7 +183,23 @@ app.post('/api/admin/banir', verificarToken, (req, res) => {
     });
 });
 
-// --- SERVIDOR ---
+// NOVA ROTA: Gerenciar Tempo de Jogo do Usuário
+app.post('/api/admin/tempo', verificarToken, (req, res) => {
+    const { idUsuario, minutos, plano } = req.body;
+    if (minutos === 0) {
+        // Se o admin zerar, remove o plano ativo
+        db.run(`UPDATE usuarios SET tempo_restante = 0, plano_ativo = 'Nenhum' WHERE id = ?`, [idUsuario], function(err) {
+            if (err) return res.status(500).json({ erro: "Erro ao remover tempo." });
+            res.json({ mensagem: "Sessão encerrada e tempo removido!" });
+        });
+    } else {
+        db.run(`UPDATE usuarios SET tempo_restante = tempo_restante + ?, plano_ativo = ? WHERE id = ?`, [minutos, plano, idUsuario], function(err) {
+            if (err) return res.status(500).json({ erro: "Erro ao adicionar tempo." });
+            res.json({ mensagem: `Adicionado ${minutos} minutos ao usuário!` });
+        });
+    }
+});
+
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, '../')));
@@ -202,5 +213,5 @@ io.on('connection', (socket) => {
 });
 
 server.listen(3000, () => {
-    console.log('🛡️ Servidor BIG-Room com Código de Conta rodando em http://localhost:3000');
+    console.log('🛡️ Servidor BIG-Room com Controle de Sessão rodando em http://localhost:3000');
 });
