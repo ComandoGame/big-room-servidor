@@ -40,9 +40,10 @@ const db = new sqlite3.Database('./bigroom.db', (err) => {
         )`);
         db.run(`CREATE TABLE IF NOT EXISTS banidos_ip (ip TEXT PRIMARY KEY)`);
         db.run(`CREATE TABLE IF NOT EXISTS banidos_hardware (visitor_id TEXT PRIMARY KEY)`);
-        // TABELA DE MENSAGENS (Sem sistema de chat complexo, apenas o ticket)
+        
+        // TABELA DE MENSAGENS (Com a coluna respondida)
         db.run(`CREATE TABLE IF NOT EXISTS mensagens (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT, email TEXT, mensagem TEXT, data_envio DATETIME DEFAULT CURRENT_TIMESTAMP
+            id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT, email TEXT, mensagem TEXT, respondida INTEGER DEFAULT 0, data_envio DATETIME DEFAULT CURRENT_TIMESTAMP
         )`);
     }
 });
@@ -154,12 +155,15 @@ function verificarAdmin(req, res, next) {
     if (!token) return res.status(401).json({ erro: "Acesso negado." });
     jwt.verify(token, JWT_SECRET, (err) => { if (err) return res.status(403).json({ erro: "Sessão expirada." }); next(); });
 }
+
 app.post('/api/admin/usuarios', verificarAdmin, (req, res) => {
     db.all(`SELECT id, codigo_conta, nome, email, saldo, banido, ip, visitor_id, plano_ativo, tempo_restante FROM usuarios`, [], (err, rows) => res.json({ usuarios: rows }));
 });
+
 app.post('/api/admin/saldo', verificarAdmin, (req, res) => {
     db.run(`UPDATE usuarios SET saldo = saldo + ? WHERE id = ?`, [req.body.valor, req.body.idUsuario], () => res.json({ mensagem: "Saldo atualizado!" }));
 });
+
 app.post('/api/admin/banir', verificarAdmin, (req, res) => {
     const status = req.body.banir ? 1 : 0;
     db.get(`SELECT ip, visitor_id FROM usuarios WHERE id = ?`, [req.body.idUsuario], (err, row) => {
@@ -175,13 +179,28 @@ app.post('/api/admin/banir', verificarAdmin, (req, res) => {
         });
     });
 });
+
 app.post('/api/admin/tempo', verificarAdmin, (req, res) => {
     const { idUsuario, minutos, plano } = req.body;
     if (minutos === 0) db.run(`UPDATE usuarios SET tempo_restante = 0, plano_ativo = 'Nenhum' WHERE id = ?`, [idUsuario], () => res.json({ mensagem: "Zerado!" }));
     else db.run(`UPDATE usuarios SET tempo_restante = tempo_restante + ?, plano_ativo = ? WHERE id = ?`, [minutos, plano, idUsuario], () => res.json({ mensagem: "Tempo adicionado!" }));
 });
+
+// ROTA DE MENSAGENS
 app.post('/api/admin/mensagens', verificarAdmin, (req, res) => {
-    db.all(`SELECT * FROM mensagens ORDER BY data_envio DESC`, [], (err, rows) => res.json({ mensagens: rows }));
+    db.all(`SELECT * FROM mensagens ORDER BY data_envio DESC`, [], (err, rows) => {
+        if (err) return res.status(500).json({ erro: "Erro ao buscar mensagens." });
+        res.json({ mensagens: rows });
+    });
+});
+
+// ROTA PARA MARCAR COMO RESPONDIDA
+app.post('/api/admin/marcar-respondida', verificarAdmin, (req, res) => {
+    const { idMensagem } = req.body;
+    db.run(`UPDATE mensagens SET respondida = 1 WHERE id = ?`, [idMensagem], function(err) {
+        if (err) return res.status(500).json({ erro: "Erro ao marcar." });
+        res.json({ mensagem: "Marcada como respondida!" });
+    });
 });
 
 // --- SOCKET E SERVIDOR ---
