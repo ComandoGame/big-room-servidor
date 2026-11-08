@@ -34,7 +34,7 @@ const db = new sqlite3.Database('./bigroom.db', (err) => {
     }
 });
 
-// --- ROTAS DE API ---
+// --- ROTAS DE API DO USUÁRIO ---
 app.post('/api/cadastro', async (req, res) => {
     const { nome, email, senha } = req.body;
     if (!nome || !email || !senha) return res.status(400).json({ erro: "Preencha todos os campos." });
@@ -69,6 +69,21 @@ app.get('/api/saldo/:id', (req, res) => {
     db.get(`SELECT saldo FROM usuarios WHERE id = ?`, [req.params.id], (err, row) => {
         if (err || !row) return res.status(404).json({ erro: "Usuário não encontrado." });
         res.json({ saldo: row.saldo });
+    });
+});
+
+// --- ROTA SECRETA DO ADMINISTRADOR ---
+app.post('/api/admin/usuarios', (req, res) => {
+    const { senhaAdmin } = req.body;
+    
+    // A SUA SENHA DE ADMINISTRADOR AQUI:
+    if (senhaAdmin !== "ComandoGame123") {
+        return res.status(403).json({ erro: "Acesso negado. Chave incorreta." });
+    }
+
+    db.all(`SELECT id, nome, email, saldo FROM usuarios`, [], (err, rows) => {
+        if (err) return res.status(500).json({ erro: "Erro ao buscar usuários." });
+        res.json({ usuarios: rows });
     });
 });
 
