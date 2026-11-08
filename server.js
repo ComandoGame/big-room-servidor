@@ -71,6 +71,30 @@ app.post('/api/login', (req, res) => {
     });
 });
 
+app.get('/api/saldo/:id', (req, res) => {
+    db.get(`SELECT saldo FROM usuarios WHERE id = ?`, [req.params.id], (err, row) => {
+        if (err || !row) return res.status(404).json({ erro: "Usuário não encontrado." });
+        res.json({ saldo: row.saldo });
+    });
+});
+
+// --- NOVA ROTA: DESCONTAR SALDO (Para comprar planos) ---
+app.post('/api/descontar', (req, res) => {
+    const { idUsuario, valor } = req.body;
+    
+    db.get(`SELECT saldo FROM usuarios WHERE id = ?`, [idUsuario], (err, user) => {
+        if (err || !user) return res.status(404).json({ erro: "Usuário não encontrado." });
+        
+        if (user.saldo < valor) return res.status(400).json({ erro: "Saldo insuficiente." });
+        
+        const novoSaldo = user.saldo - valor;
+        db.run(`UPDATE usuarios SET saldo = ? WHERE id = ?`, [novoSaldo, idUsuario], function(err) {
+            if (err) return res.status(500).json({ erro: "Erro ao descontar saldo." });
+            res.json({ mensagem: "Pagamento aprovado!", novoSaldo: novoSaldo });
+        });
+    });
+});
+
 // --- SISTEMA DE SEGURANÇA DO ADMIN (JWT) ---
 const JWT_SECRET = "bigroom_chave_secreta_super_segura_2026";
 const SENHA_ADMIN_CRIACAO = "ComandoGame123";
