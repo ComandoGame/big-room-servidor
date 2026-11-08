@@ -11,31 +11,15 @@ const jwt = require('jsonwebtoken');
 
 const app = express();
 app.set('trust proxy', 1);
-
-// --- SEGURANÇA EXTREMA (CORS e Helmet) ---
 app.use(cors({ 
     origin: ['https://big-room-site.onrender.com', 'http://127.0.0.1:5500', 'http://localhost:5500'],
     methods: ['GET', 'POST']
 })); 
-
 app.use(express.json({ limit: '10kb' })); 
-
-app.use(helmet({
-    contentSecurityPolicy: {
-        directives: {
-            defaultSrc: ["'self'"],
-            scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.socket.io"],
-            styleSrc: ["'self'", "'unsafe-inline'"],
-            imgSrc: ["'self'", "data:", "https:"],
-            connectSrc: ["'self'", "https://big-room-servidor.onrender.com", "wss://big-room-servidor.onrender.com"]
-        }
-    },
-    crossOriginResourcePolicy: { policy: "cross-origin" }
-}));
-
+app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.disable('x-powered-by');
 
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: "Muitas requisições." });
+const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
 app.use('/api/', limiter);
 
 // --- BANCO DE DADOS ---
@@ -54,10 +38,13 @@ const db = new sqlite3.Database('./bigroom.db', (err) => {
             plano_ativo TEXT DEFAULT 'Nenhum',
             tempo_restante INTEGER DEFAULT 0
         )`);
+        
+        // NOVA TABELA: IPs Banidos (Persistente no banco de dados)
+        db.run(`CREATE TABLE IF NOT EXISTS ips_banidos (
+            ip TEXT PRIMARY KEY
+        )`);
     }
 });
-
-const ipsCadastrados = new Map(); 
 
 function gerarCodigo() {
     const caracteres = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -75,49 +62,55 @@ app.post('/api/cadastro', async (req, res) => {
 
     if (!nome || !email || !senha) return res.status(400).json({ erro: "Preencha todos os campos." });
 
-    const dominiosPermitidos = ['gmail.com', 'hotmail.com', 'outlook.com', 'yahoo.com', 'icloud.com'];
-    const dominio = email.split('@')[1];
-    if (!dominiosPermitidos.includes(dominio)) {
-        return res.status(400).json({ erro: "Por favor, use um e-mail válido (Gmail, Hotmail, Outlook, etc)." });
-    }
+    // Checa se o IP está na lista de banidos
+    db.get(`SELECT ip FROM ips_banidos WHERE ip = ?`, [ip], (err, row) => {
+        if (row) {
+            return res.status(403).json({ erro: "Acesso negado. Seu IP está bloqueado no BIG-Room." });
+        }
 
-    const ultimoCadastro = ipsCadastrados.get(ip);
-    if (ultimoCadastro && (Date.now() - ultimoCadastro < 7 * 24 * 60 * 60 * 1000)) {
-        return res.status(429).json({ erro: "Você já criou uma conta recentemente. Aguarde 7 dias." });
-    }
+        const dominiosPermitidos = ['gmail.com', 'hotmail.com', 'outlook.com', 'yahoo.com', 'icloud.com'];
+        const dominio = email.split('@')[1];
+        if (!dominiosPermitidos.includes(dominio)) {
+            return res.status(400).json({ erro: "Por favor, use um e-mail válido (Gmail, Hotmail, Outlook, etc)." });
+        }
 
-    try {
-        const senhaHash = await bcrypt.hash(senha, 10);
-        const codigoConta = gerarCodigo();
-
-        db.run(`INSERT INTO usuarios (codigo_conta, nome, email, senha, saldo, ip) VALUES (?, ?, ?, ?, ?, ?)`, 
-            [codigoConta, nome, email, senhaHash, 5.00, ip],
-            function(err) {
-                if (err) {
-                    if (err.message.includes('UNIQUE constraint failed: usuarios.email')) {
-                        return res.status(400).json({ erro: "Este e-mail já está cadastrado." });
+        bcrypt.hash(senha, 10).then(senhaHash => {
+            const codigoConta = gerarCodigo();
+            db.run(`INSERT INTO usuarios (codigo_conta, nome, email, senha, saldo, ip) VALUES (?, ?, ?, ?, ?, ?)`, 
+                [codigoConta, nome, email, senhaHash, 5.00, ip],
+                function(err) {
+                    if (err) {
+                        if (err.message.includes('UNIQUE constraint failed: usuarios.email')) {
+                            return res.status(400).json({ erro: "Este e-mail já está cadastrado." });
+                        }
+                        return res.status(500).json({ erro: "Erro interno." });
                     }
-                    return res.status(500).json({ erro: "Erro interno." });
+                    res.json({ mensagem: "Cadastro realizado!", usuario: { id: this.lastID, codigo_conta: codigoConta, nome, saldo: 5.00 } });
                 }
-                ipsCadastrados.set(ip, Date.now());
-                res.json({ mensagem: "Cadastro realizado!", usuario: { id: this.lastID, codigo_conta: codigoConta, nome, saldo: 5.00 } });
-            }
-        );
-    } catch (error) {
-        res.status(500).json({ erro: "Erro no servidor." });
-    }
+            );
+        });
+    });
 });
 
 app.post('/api/login', (req, res) => {
     const { email, senha } = req.body;
-    db.get(`SELECT * FROM usuarios WHERE email = ?`, [email], async (err, usuario) => {
-        if (err || !usuario) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
-        if (usuario.banido === 1) return res.status(403).json({ erro: "Sua conta foi banida." });
+    const ip = req.ip || req.connection.remoteAddress;
 
-        const senhaValida = await bcrypt.compare(senha, usuario.senha);
-        if (!senhaValida) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
-        
-        res.json({ mensagem: "Login realizado!", usuario: { id: usuario.id, codigo_conta: usuario.codigo_conta, nome: usuario.nome, saldo: usuario.saldo, plano_ativo: usuario.plano_ativo, tempo_restante: usuario.tempo_restante } });
+    // Checa se o IP está na lista de banidos
+    db.get(`SELECT ip FROM ips_banidos WHERE ip = ?`, [ip], (err, row) => {
+        if (row) {
+            return res.status(403).json({ erro: "Acesso negado. Seu IP está bloqueado no BIG-Room." });
+        }
+
+        db.get(`SELECT * FROM usuarios WHERE email = ?`, [email], async (err, usuario) => {
+            if (err || !usuario) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
+            if (usuario.banido === 1) return res.status(403).json({ erro: "Sua conta foi banida." });
+
+            const senhaValida = await bcrypt.compare(senha, usuario.senha);
+            if (!senhaValida) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
+            
+            res.json({ mensagem: "Login realizado!", usuario: { id: usuario.id, codigo_conta: usuario.codigo_conta, nome: usuario.nome, saldo: usuario.saldo, plano_ativo: usuario.plano_ativo, tempo_restante: usuario.tempo_restante } });
+        });
     });
 });
 
@@ -182,9 +175,25 @@ app.post('/api/admin/saldo', verificarToken, (req, res) => {
 app.post('/api/admin/banir', verificarToken, (req, res) => {
     const { idUsuario, banir } = req.body;
     const statusBanido = banir ? 1 : 0;
-    db.run(`UPDATE usuarios SET banido = ? WHERE id = ?`, [statusBanido, idUsuario], function(err) {
-        if (err) return res.status(500).json({ erro: "Erro." });
-        res.json({ mensagem: banir ? "Banido!" : "Desbanido!" });
+    
+    db.get(`SELECT ip FROM usuarios WHERE id = ?`, [idUsuario], (err, row) => {
+        if (err || !row) return res.status(404).json({ erro: "Usuário não encontrado." });
+        
+        db.run(`UPDATE usuarios SET banido = ? WHERE id = ?`, [statusBanido, idUsuario], function(err) {
+            if (err) return res.status(500).json({ erro: "Erro ao banir usuário." });
+            
+            if (banir) {
+                db.run(`INSERT OR IGNORE INTO ips_banidos (ip) VALUES (?)`, [row.ip], function(err) {
+                    if (err) return res.status(500).json({ erro: "Erro ao salvar IP." });
+                    res.json({ mensagem: "Usuário e IP banidos com sucesso!" });
+                });
+            } else {
+                db.run(`DELETE FROM ips_banidos WHERE ip = ?`, [row.ip], function(err) {
+                    if (err) return res.status(500).json({ erro: "Erro ao remover IP." });
+                    res.json({ mensagem: "Usuário e IP desbanidos com sucesso!" });
+                });
+            }
+        });
     });
 });
 
@@ -203,7 +212,7 @@ app.post('/api/admin/tempo', verificarToken, (req, res) => {
     }
 });
 
-// --- SERVIDOR E SOCKET ---
+// --- SERVIDOR ---
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, '../')));
@@ -217,5 +226,5 @@ io.on('connection', (socket) => {
 });
 
 server.listen(3000, () => {
-    console.log('🛡️ Servidor BIG-Room BLINDADO rodando em http://localhost:3000');
+    console.log('🛡️ Servidor BIG-Room com Banimento de IP ativado em http://localhost:3000');
 });
