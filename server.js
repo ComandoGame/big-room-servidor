@@ -35,13 +35,19 @@ app.use('/api/', limiter);
 const db = new sqlite3.Database('./bigroom.db', (err) => {
     if (!err) {
         console.log("📦 Banco de dados conectado.");
+        // Tabela de Usuários
         db.run(`CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT, codigo_conta TEXT UNIQUE, nome TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
             senha TEXT NOT NULL, saldo REAL DEFAULT 0.00, banido INTEGER DEFAULT 0, ip TEXT DEFAULT 'Desconhecido', visitor_id TEXT DEFAULT 'Desconhecido',
             plano_ativo TEXT DEFAULT 'Nenhum', tempo_restante INTEGER DEFAULT 0, ultimo_teste_gratis INTEGER DEFAULT 0
         )`);
+        // Tabelas de Banimento
         db.run(`CREATE TABLE IF NOT EXISTS banidos_ip (ip TEXT PRIMARY KEY)`);
         db.run(`CREATE TABLE IF NOT EXISTS banidos_hardware (visitor_id TEXT PRIMARY KEY)`);
+        // Tabela de Mensagens de Contato
+        db.run(`CREATE TABLE IF NOT EXISTS mensagens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER, nome TEXT, email TEXT, mensagem TEXT, lida INTEGER DEFAULT 0, data_envio DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
     }
 });
 
@@ -56,10 +62,7 @@ function gerarCodigo() {
 function gerarTokenEEnviarCookie(res, usuario) {
     const token = jwt.sign({ id: usuario.id, role: 'user' }, JWT_SECRET, { expiresIn: '7d' });
     res.cookie('bigroom_token', token, {
-        httpOnly: true, // O JavaScript do navegador não consegue ler
-        secure: true,   // Apenas HTTPS
-        sameSite: 'none',
-        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 dias
+        httpOnly: true, secure: true, sameSite: 'none', maxAge: 7 * 24 * 60 * 60 * 1000
     });
 }
 
@@ -113,7 +116,6 @@ app.post('/api/login', (req, res) => {
     });
 });
 
-// ROTA CRÍTICA: Pega os dados do usuário logado (Substitui o localStorage)
 app.get('/api/me', autenticarUser, (req, res) => {
     db.get(`SELECT nome, saldo, tempo_restante, plano_ativo, banido FROM usuarios WHERE id = ?`, [req.userId], (err, row) => {
         if (err || !row) return res.status(404).json({ erro: "Usuário não encontrado." });
@@ -149,7 +151,34 @@ app.post('/api/descontar', autenticarUser, (req, res) => {
     });
 });
 
-// --- ADMINISTRAÇÃO (Protegida por JWT) ---
+// --- NOVA ROTA: CONTATO ---
+app.post('/api/contato', (req, res) => {
+    const { nome, email, mensagem } = req.body;
+    let usuarioId = null;
+    
+    // Tenta pegar o ID se o usuário estiver logado
+    if (req.cookies.bigroom_token) {
+        try {
+            const decoded = jwt.verify(req.cookies.bigroom_token, JWT_SECRET);
+            usuarioId = decoded.id;
+        } catch (e) {}
+    }
+
+    if (!nome || !email || !mensagem) return res.status(400).json({ erro: "Preencha todos os campos." });
+
+    db.run(`INSERT INTO mensagens (usuario_id, nome, email, mensagem) VALUES (?, ?, ?, ?)`, 
+        [usuarioId, nome, email, mensagem], 
+        function(err) {
+            if (err) {
+                console.error("Erro ao salvar mensagem:", err);
+                return res.status(500).json({ erro: "Erro interno ao enviar mensagem." });
+            }
+            res.json({ mensagem: "Mensagem enviada com sucesso! O desenvolvedor entrará em contato." });
+        }
+    );
+});
+
+// --- ADMINISTRAÇÃO ---
 const SENHA_ADMIN = "ComandoGame123";
 
 app.post('/api/admin/login', (req, res) => {
@@ -192,6 +221,14 @@ app.post('/api/admin/tempo', verificarAdmin, (req, res) => {
     const { idUsuario, minutos, plano } = req.body;
     if (minutos === 0) db.run(`UPDATE usuarios SET tempo_restante = 0, plano_ativo = 'Nenhum' WHERE id = ?`, [idUsuario], () => res.json({ mensagem: "Zerado!" }));
     else db.run(`UPDATE usuarios SET tempo_restante = tempo_restante + ?, plano_ativo = ? WHERE id = ?`, [minutos, plano, idUsuario], () => res.json({ mensagem: "Tempo adicionado!" }));
+});
+
+// ROTA PARA O ADMIN LER AS MENSAGENS
+app.post('/api/admin/mensagens', verificarAdmin, (req, res) => {
+    db.all(`SELECT * FROM mensagens ORDER BY data_envio DESC`, [], (err, rows) => {
+        if (err) return res.status(500).json({ erro: "Erro ao buscar mensagens." });
+        res.json({ mensagens: rows });
+    });
 });
 
 // --- SOCKET E SERVIDOR ---
