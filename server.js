@@ -6,18 +6,17 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
-const cors = require('cors'); // <-- NOVO
+const cors = require('cors');
 
 const app = express();
 
-// --- CORREÇÃO DO ERRO NO RENDER (Proxy) ---
-app.set('trust proxy', 1); 
-
-// --- SEGURANÇA E CORS ---
-app.use(cors()); // <-- NOVO: Permite que o HTML local se conecte ao servidor na nuvem
+// --- SEGURANÇA E PROXY ---
+app.set('trust proxy', 1);
+app.use(cors()); 
 app.use(express.json()); 
 app.use(helmet({ contentSecurityPolicy: false })); 
 app.disable('x-powered-by');
+
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 50, message: "Muitas requisições." });
 app.use('/api/', limiter);
 
@@ -43,14 +42,14 @@ app.post('/api/cadastro', async (req, res) => {
     try {
         const senhaHash = await bcrypt.hash(senha, 10);
         db.run(`INSERT INTO usuarios (nome, email, senha, saldo) VALUES (?, ?, ?, ?)`, 
-            [nome, email, senhaHash, 5.00], // Bônus de R$ 5,00
+            [nome, email, senhaHash, 5.00],
             function(err) {
                 if (err) return res.status(400).json({ erro: "E-mail já cadastrado." });
                 res.json({ mensagem: "Cadastro realizado!", usuario: { id: this.lastID, nome, saldo: 5.00 } });
             }
         );
     } catch (error) {
-        res.status(500).json({ erro: "Erro interno." });
+        res.status(500).json({ erro: "Erro interno no servidor." });
     }
 });
 
@@ -58,8 +57,10 @@ app.post('/api/login', (req, res) => {
     const { email, senha } = req.body;
     db.get(`SELECT * FROM usuarios WHERE email = ?`, [email], async (err, usuario) => {
         if (err || !usuario) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
+        
         const senhaValida = await bcrypt.compare(senha, usuario.senha);
         if (!senhaValida) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
+        
         res.json({ mensagem: "Login realizado!", usuario: { id: usuario.id, nome: usuario.nome, saldo: usuario.saldo } });
     });
 });
@@ -71,12 +72,13 @@ app.get('/api/saldo/:id', (req, res) => {
     });
 });
 
-// --- SERVIDOR E SOCKET.IO ---
+// --- SOCKET.IO E SERVIDOR ---
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, '../')));
 
 io.on('connection', (socket) => {
+    console.log('Jogador conectado:', socket.id);
     socket.on('iniciar_maquina', () => {
         setTimeout(() => {
             socket.emit('maquina_pronta', { ip: '127.0.0.1', porta: '47989' });
