@@ -8,11 +8,8 @@ const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
-
-// --- IMPORTAÇÕES DAS APIS DE SEGURANÇA ---
-// Em produção, descomente e use as chaves reais.
-// const { FingerprintServerApiClient, Region } = require('@fingerprint/node-sdk');
-// const IPQualityScore = require('ipqs-node-sdk');
+const axios = require('axios');
+const { FingerprintServerApiClient, Region } = require('@fingerprint/node-sdk');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -21,17 +18,24 @@ app.use(cors({
     methods: ['GET', 'POST']
 })); 
 app.use(express.json({ limit: '10kb' })); 
-app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: "cross-origin" } }));
+app.use(helmet({ contentSecurityPolicy: false }));
 app.disable('x-powered-by');
 
-const limiter = rateLimit({ windowMs: 60 * 1000, max: 20 });
+// --- CONFIGURAÇÃO DE CHAVES DE API ---
+// COLOQUE AS SUAS CHAVES AQUI (Depois de criar as contas)
+const FP_SECRET_API_KEY = "SUA_SECRET_KEY_FINGERPRINT_AQUI"; 
+const IPQS_API_KEY = "SUA_CHAVE_IPQS_AQUI"; 
+
+const fpClient = new FingerprintServerApiClient({ apiKey: FP_SECRET_API_KEY, region: Region.Global });
+
+// Limiter para evitar spam de requisições
+const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
 app.use('/api/', limiter);
 
 // --- BANCO DE DADOS ---
 const db = new sqlite3.Database('./bigroom.db', (err) => {
     if (!err) {
         console.log("📦 Banco de dados conectado.");
-        // Adicionado a coluna dispositivo_id para o Fingerprint
         db.run(`CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             codigo_conta TEXT UNIQUE,
@@ -41,14 +45,32 @@ const db = new sqlite3.Database('./bigroom.db', (err) => {
             saldo REAL DEFAULT 0.00,
             banido INTEGER DEFAULT 0,
             ip TEXT DEFAULT 'Desconhecido',
-            dispositivo_id TEXT DEFAULT 'Desconhecido', 
+            visitor_id TEXT DEFAULT 'Desconhecido',
             plano_ativo TEXT DEFAULT 'Nenhum',
             tempo_restante INTEGER DEFAULT 0
         )`);
-        db.run(`CREATE TABLE IF NOT EXISTS ips_banidos (ip TEXT PRIMARY KEY)`);
-        db.run(`CREATE TABLE IF NOT EXISTS dispositivos_banidos (dispositivo_id TEXT PRIMARY KEY)`);
+        db.run(`CREATE TABLE IF NOT EXISTS banidos_ip (ip TEXT PRIMARY KEY)`);
+        db.run(`CREATE TABLE IF NOT EXISTS banidos_hardware (visitor_id TEXT PRIMARY KEY)`);
     }
 });
+
+// --- FUNÇÕES DE SEGURANÇA ---
+function checarHardwareBanido(visitorId) {
+    return new Promise((resolve) => {
+        if (!visitorId || visitorId === 'Desconhecido') return resolve(false);
+        db.get(`SELECT visitor_id FROM banidos_hardware WHERE visitor_id = ?`, [visitorId], (err, row) => {
+            resolve(!!row);
+        });
+    });
+}
+
+async function checarIPSuspeito(ip) {
+    if (IPQS_API_KEY === "SUA_CHAVE_IPQS_AQUI") return false; 
+    try {
+        const response = await axios.get(`https://ipqualityscore.com/api/json/ip/${IPQS_API_KEY}/${ip}`);
+        return (response.data.proxy || response.data.vpn || response.data.tor);
+    } catch (error) { return false; }
+}
 
 function gerarCodigo() {
     const caracteres = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -61,62 +83,61 @@ function gerarCodigo() {
 app.post('/api/cadastro', async (req, res) => {
     const { nome, email, senha, visitorId } = req.body;
     const ip = req.ip || req.connection.remoteAddress;
-    const dispId = visitorId || 'DISPOSITIVO_NAO_IDENTIFICADO'; // Recebe do frontend
 
     if (!nome || !email || !senha) return res.status(400).json({ erro: "Preencha todos os campos." });
 
-    // Verifica IP e Dispositivo Banido
-    db.get(`SELECT ip FROM ips_banidos WHERE ip = ?`, [ip], (err, rowIp) => {
-        if (rowIp) return res.status(403).json({ erro: "Seu IP está bloqueado." });
+    // 1. Verifica IP Banido
+    db.get(`SELECT ip FROM banidos_ip WHERE ip = ?`, [ip], async (err, ipRow) => {
+        if (ipRow) return res.status(403).json({ erro: "Seu IP está bloqueado no BIG-Room." });
 
-        db.get(`SELECT dispositivo_id FROM dispositivos_banidos WHERE dispositivo_id = ?`, [dispId], (err, rowDisp) => {
-            if (rowDisp) return res.status(403).json({ erro: "Este dispositivo está permanentemente banido." });
+        // 2. Verifica Hardware Banido
+        const hardwareBanido = await checarHardwareBanido(visitorId);
+        if (hardwareBanido) return res.status(403).json({ erro: "Este dispositivo está permanentemente suspenso." });
 
-            // Validação de e-mail
-            const dominiosPermitidos = ['gmail.com', 'hotmail.com', 'outlook.com', 'yahoo.com', 'icloud.com'];
-            if (!dominiosPermitidos.includes(email.split('@')[1])) {
-                return res.status(400).json({ erro: "Use um e-mail válido (Gmail, Hotmail, Outlook)." });
-            }
+        // 3. Verifica VPN (IPQS)
+        const ipSuspeito = await checarIPSuspeito(ip);
+        if (ipSuspeito) return res.status(403).json({ erro: "O uso de VPN/Proxy é proibido para criar contas." });
 
-            bcrypt.hash(senha, 10).then(senhaHash => {
-                const codigoConta = gerarCodigo();
-                db.run(`INSERT INTO usuarios (codigo_conta, nome, email, senha, saldo, ip, dispositivo_id) VALUES (?, ?, ?, ?, ?, ?, ?)`, 
-                    [codigoConta, nome, email, senhaHash, 5.00, ip, dispId],
-                    function(err) {
-                        if (err) {
-                            if (err.message.includes('UNIQUE constraint failed: usuarios.email')) {
-                                return res.status(400).json({ erro: "Este e-mail já está em uso." });
-                            }
-                            return res.status(500).json({ erro: "Erro ao criar conta." });
+        try {
+            const senhaHash = await bcrypt.hash(senha, 10);
+            const codigoConta = gerarCodigo();
+
+            db.run(`INSERT INTO usuarios (codigo_conta, nome, email, senha, saldo, ip, visitor_id) VALUES (?, ?, ?, ?, ?, ?, ?)`, 
+                [codigoConta, nome, email, senhaHash, 5.00, ip, visitorId || 'Desconhecido'],
+                function(err) {
+                    if (err) {
+                        if (err.message.includes('UNIQUE constraint failed: usuarios.email')) {
+                            return res.status(400).json({ erro: "Este e-mail já está cadastrado." });
                         }
-                        res.json({ mensagem: "Conta criada!", usuario: { id: this.lastID, codigo_conta: codigoConta, nome, saldo: 5.00 } });
+                        return res.status(500).json({ erro: "Erro interno." });
                     }
-                );
-            });
-        });
+                    res.json({ mensagem: "Cadastro realizado!", usuario: { id: this.lastID, codigo_conta: codigoConta, nome, saldo: 5.00 } });
+                }
+            );
+        } catch (error) {
+            res.status(500).json({ erro: "Erro no servidor." });
+        }
     });
 });
 
 app.post('/api/login', (req, res) => {
     const { email, senha, visitorId } = req.body;
     const ip = req.ip || req.connection.remoteAddress;
-    const dispId = visitorId || 'DISPOSITIVO_NAO_IDENTIFICADO';
 
-    db.get(`SELECT ip FROM ips_banidos WHERE ip = ?`, [ip], (err, rowIp) => {
-        if (rowIp) return res.status(403).json({ erro: "Seu IP está bloqueado." });
+    db.get(`SELECT ip FROM banidos_ip WHERE ip = ?`, [ip], async (err, ipRow) => {
+        if (ipRow) return res.status(403).json({ erro: "Seu IP está bloqueado." });
 
-        db.get(`SELECT dispositivo_id FROM dispositivos_banidos WHERE dispositivo_id = ?`, [dispId], (err, rowDisp) => {
-            if (rowDisp) return res.status(403).json({ erro: "Este dispositivo está banido." });
+        const hardwareBanido = await checarHardwareBanido(visitorId);
+        if (hardwareBanido) return res.status(403).json({ erro: "Este dispositivo está banido." });
 
-            db.get(`SELECT * FROM usuarios WHERE email = ?`, [email], async (err, usuario) => {
-                if (err || !usuario) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
-                if (usuario.banido === 1) return res.status(403).json({ erro: "Sua conta foi banida." });
+        db.get(`SELECT * FROM usuarios WHERE email = ?`, [email], async (err, usuario) => {
+            if (err || !usuario) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
+            if (usuario.banido === 1) return res.status(403).json({ erro: "Sua conta foi banida." });
 
-                const senhaValida = await bcrypt.compare(senha, usuario.senha);
-                if (!senhaValida) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
-                
-                res.json({ mensagem: "Login realizado!", usuario: { id: usuario.id, codigo_conta: usuario.codigo_conta, nome: usuario.nome, saldo: usuario.saldo, plano_ativo: usuario.plano_ativo, tempo_restante: usuario.tempo_restante } });
-            });
+            const senhaValida = await bcrypt.compare(senha, usuario.senha);
+            if (!senhaValida) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
+            
+            res.json({ mensagem: "Login realizado!", usuario: { id: usuario.id, codigo_conta: usuario.codigo_conta, nome: usuario.nome, saldo: usuario.saldo, plano_ativo: usuario.plano_ativo, tempo_restante: usuario.tempo_restante } });
         });
     });
 });
@@ -155,7 +176,8 @@ app.post('/api/admin/login', (req, res) => {
 });
 
 function verificarToken(req, res, next) {
-    const token = req.headers['authorization']?.split(' ')[1];
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
     if (!token) return res.status(401).json({ erro: "Acesso negado." });
     jwt.verify(token, JWT_SECRET, (err) => {
         if (err) return res.status(403).json({ erro: "Sessão expirada." });
@@ -164,7 +186,7 @@ function verificarToken(req, res, next) {
 }
 
 app.post('/api/admin/usuarios', verificarToken, (req, res) => {
-    db.all(`SELECT id, codigo_conta, nome, email, saldo, banido, ip, plano_ativo, tempo_restante FROM usuarios`, [], (err, rows) => {
+    db.all(`SELECT id, codigo_conta, nome, email, saldo, banido, ip, visitor_id, plano_ativo, tempo_restante FROM usuarios`, [], (err, rows) => {
         if (err) return res.status(500).json({ erro: "Erro." });
         res.json({ usuarios: rows });
     });
@@ -178,27 +200,24 @@ app.post('/api/admin/saldo', verificarToken, (req, res) => {
     });
 });
 
-// O BANIR AGORA BLOQUEIA A CONTA, O IP E O DISPOSITIVO (FINGERPRINT)
 app.post('/api/admin/banir', verificarToken, (req, res) => {
     const { idUsuario, banir } = req.body;
     const statusBanido = banir ? 1 : 0;
     
-    db.get(`SELECT ip, dispositivo_id FROM usuarios WHERE id = ?`, [idUsuario], (err, row) => {
+    db.get(`SELECT ip, visitor_id FROM usuarios WHERE id = ?`, [idUsuario], (err, row) => {
         if (err || !row) return res.status(404).json({ erro: "Usuário não encontrado." });
         
         db.run(`UPDATE usuarios SET banido = ? WHERE id = ?`, [statusBanido, idUsuario], function(err) {
-            if (err) return res.status(500).json({ erro: "Erro." });
+            if (err) return res.status(500).json({ erro: "Erro ao banir." });
             
             if (banir) {
-                db.run(`INSERT OR IGNORE INTO ips_banidos (ip) VALUES (?)`, [row.ip]);
-                db.run(`INSERT OR IGNORE INTO dispositivos_banidos (dispositivo_id) VALUES (?)`, [row.dispositivo_id], function(err) {
-                    res.json({ mensagem: "Usuário, IP e Dispositivo banidos!" });
-                });
+                db.run(`INSERT OR IGNORE INTO banidos_ip (ip) VALUES (?)`, [row.ip]);
+                db.run(`INSERT OR IGNORE INTO banidos_hardware (visitor_id) VALUES (?)`, [row.visitor_id]);
+                res.json({ mensagem: "Usuário, IP e Dispositivo banidos!" });
             } else {
-                db.run(`DELETE FROM ips_banidos WHERE ip = ?`, [row.ip]);
-                db.run(`DELETE FROM dispositivos_banidos WHERE dispositivo_id = ?`, [row.dispositivo_id], function(err) {
-                    res.json({ mensagem: "Usuário e Dispositivo desbanidos!" });
-                });
+                db.run(`DELETE FROM banidos_ip WHERE ip = ?`, [row.ip]);
+                db.run(`DELETE FROM banidos_hardware WHERE visitor_id = ?`, [row.visitor_id]);
+                res.json({ mensagem: "Usuário e Dispositivo desbanidos!" });
             }
         });
     });
@@ -233,5 +252,5 @@ io.on('connection', (socket) => {
 });
 
 server.listen(3000, () => {
-    console.log('🛡️ Servidor BIG-Room BLINDADO rodando em http://localhost:3000');
+    console.log('🛡️ Servidor BIG-Room BLINDADO com Fingerprint rodando em http://localhost:3000');
 });
