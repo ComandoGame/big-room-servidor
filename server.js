@@ -22,10 +22,8 @@ app.use(cookieParser());
 app.use(helmet({ contentSecurityPolicy: false }));
 app.disable('x-powered-by');
 
-// --- CONFIGURAÇÃO DE CHAVES ---
-const FP_SECRET_API_KEY = "COLE_SUA_SECRET_KEY_AQUI"; // Começa com sk_
+const FP_SECRET_API_KEY = "COLE_SUA_SECRET_KEY_AQUI"; 
 const JWT_SECRET = "bigroom_chave_secreta_super_segura_2026";
-
 const fpClient = new FingerprintServerApiClient({ apiKey: FP_SECRET_API_KEY, region: Region.Global });
 
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
@@ -35,44 +33,31 @@ app.use('/api/', limiter);
 const db = new sqlite3.Database('./bigroom.db', (err) => {
     if (!err) {
         console.log("📦 Banco de dados conectado.");
-        // Tabela de Usuários
         db.run(`CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT, codigo_conta TEXT UNIQUE, nome TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
             senha TEXT NOT NULL, saldo REAL DEFAULT 0.00, banido INTEGER DEFAULT 0, ip TEXT DEFAULT 'Desconhecido', visitor_id TEXT DEFAULT 'Desconhecido',
             plano_ativo TEXT DEFAULT 'Nenhum', tempo_restante INTEGER DEFAULT 0, ultimo_teste_gratis INTEGER DEFAULT 0
         )`);
-        // Tabelas de Banimento
         db.run(`CREATE TABLE IF NOT EXISTS banidos_ip (ip TEXT PRIMARY KEY)`);
         db.run(`CREATE TABLE IF NOT EXISTS banidos_hardware (visitor_id TEXT PRIMARY KEY)`);
-        // Tabela de Mensagens de Contato
+        // NOVA TABELA DE MENSAGENS COM RESPOSTA
         db.run(`CREATE TABLE IF NOT EXISTS mensagens (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER, nome TEXT, email TEXT, mensagem TEXT, lida INTEGER DEFAULT 0, data_envio DATETIME DEFAULT CURRENT_TIMESTAMP
+            id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER, nome TEXT, email TEXT, mensagem TEXT, resposta TEXT, lida INTEGER DEFAULT 0, data_envio DATETIME DEFAULT CURRENT_TIMESTAMP
         )`);
     }
 });
 
-// --- FUNÇÕES AUXILIARES ---
-function gerarCodigo() {
-    const caracteres = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let codigo = 'BR-';
-    for (let i = 0; i < 5; i++) codigo += caracteres.charAt(Math.floor(Math.random() * caracteres.length));
-    return codigo;
-}
-
+function gerarCodigo() { return 'BR-' + Math.random().toString(36).substring(2, 7).toUpperCase(); }
 function gerarTokenEEnviarCookie(res, usuario) {
     const token = jwt.sign({ id: usuario.id, role: 'user' }, JWT_SECRET, { expiresIn: '7d' });
-    res.cookie('bigroom_token', token, {
-        httpOnly: true, secure: true, sameSite: 'none', maxAge: 7 * 24 * 60 * 60 * 1000
-    });
+    res.cookie('bigroom_token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 7 * 24 * 60 * 60 * 1000 });
 }
-
 function autenticarUser(req, res, next) {
     const token = req.cookies.bigroom_token;
     if (!token) return res.status(401).json({ erro: "Não autenticado." });
     jwt.verify(token, JWT_SECRET, (err, decoded) => {
         if (err) return res.status(403).json({ erro: "Sessão inválida." });
-        req.userId = decoded.id;
-        next();
+        req.userId = decoded.id; next();
     });
 }
 
@@ -83,8 +68,7 @@ app.post('/api/cadastro', async (req, res) => {
     if (!nome || !email || !senha) return res.status(400).json({ erro: "Preencha todos os campos." });
 
     db.get(`SELECT ip FROM banidos_ip WHERE ip = ?`, [ip], async (err, row) => {
-        if (row) return res.status(403).json({ erro: "Seu IP está bloqueado no BIG-Room." });
-
+        if (row) return res.status(403).json({ erro: "Seu IP está bloqueado." });
         try {
             const senhaHash = await bcrypt.hash(senha, 10);
             const codigoConta = gerarCodigo();
@@ -94,7 +78,7 @@ app.post('/api/cadastro', async (req, res) => {
                     if (err) return res.status(400).json({ erro: "E-mail já cadastrado." });
                     const usuario = { id: this.lastID, nome, saldo: 5.00 };
                     gerarTokenEEnviarCookie(res, usuario);
-                    res.json({ mensagem: "Conta criada!", usuario: usuario });
+                    res.json({ mensagem: "Conta criada!", usuario });
                 }
             );
         } catch (error) { res.status(500).json({ erro: "Erro no servidor." }); }
@@ -104,15 +88,13 @@ app.post('/api/cadastro', async (req, res) => {
 app.post('/api/login', (req, res) => {
     const { email, senha } = req.body;
     db.get(`SELECT * FROM usuarios WHERE email = ?`, [email], async (err, usuario) => {
-        if (err || !usuario) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
-        if (usuario.banido === 1) return res.status(403).json({ erro: "Sua conta foi banida." });
-        
-        const senhaValida = await bcrypt.compare(senha, usuario.senha);
-        if (!senhaValida) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
-        
+        if (err || !usuario) return res.status(401).json({ erro: "Dados incorretos." });
+        if (usuario.banido === 1) return res.status(403).json({ erro: "Conta banida." });
+        const valida = await bcrypt.compare(senha, usuario.senha);
+        if (!valida) return res.status(401).json({ erro: "Dados incorretos." });
         const dadosUser = { id: usuario.id, nome: usuario.nome, saldo: usuario.saldo };
         gerarTokenEEnviarCookie(res, dadosUser);
-        res.json({ mensagem: "Login realizado!", usuario: dadosUser });
+        res.json({ mensagem: "Bem-vindo!", usuario: dadosUser });
     });
 });
 
@@ -124,10 +106,7 @@ app.get('/api/me', autenticarUser, (req, res) => {
     });
 });
 
-app.post('/api/logout', (req, res) => {
-    res.clearCookie('bigroom_token');
-    res.json({ mensagem: "Logout realizado." });
-});
+app.post('/api/logout', (req, res) => { res.clearCookie('bigroom_token'); res.json({ mensagem: "Logout." }); });
 
 app.post('/api/teste-gratis', autenticarUser, (req, res) => {
     const agora = Date.now();
@@ -151,56 +130,45 @@ app.post('/api/descontar', autenticarUser, (req, res) => {
     });
 });
 
-// --- NOVA ROTA: CONTATO ---
 app.post('/api/contato', (req, res) => {
     const { nome, email, mensagem } = req.body;
     let usuarioId = null;
-    
-    // Tenta pegar o ID se o usuário estiver logado
     if (req.cookies.bigroom_token) {
-        try {
-            const decoded = jwt.verify(req.cookies.bigroom_token, JWT_SECRET);
-            usuarioId = decoded.id;
-        } catch (e) {}
+        try { usuarioId = jwt.verify(req.cookies.bigroom_token, JWT_SECRET).id; } catch (e) {}
     }
-
     if (!nome || !email || !mensagem) return res.status(400).json({ erro: "Preencha todos os campos." });
+    db.run(`INSERT INTO mensagens (usuario_id, nome, email, mensagem) VALUES (?, ?, ?, ?)`, [usuarioId, nome, email, mensagem], function(err) {
+        if (err) return res.status(500).json({ erro: "Erro interno." });
+        res.json({ mensagem: "Mensagem enviada!" });
+    });
+});
 
-    db.run(`INSERT INTO mensagens (usuario_id, nome, email, mensagem) VALUES (?, ?, ?, ?)`, 
-        [usuarioId, nome, email, mensagem], 
-        function(err) {
-            if (err) {
-                console.error("Erro ao salvar mensagem:", err);
-                return res.status(500).json({ erro: "Erro interno ao enviar mensagem." });
-            }
-            res.json({ mensagem: "Mensagem enviada com sucesso! O desenvolvedor entrará em contato." });
-        }
-    );
+// --- ROTA DE NOTIFICAÇÕES DO USUÁRIO ---
+app.get('/api/notificacoes', autenticarUser, (req, res) => {
+    db.all(`SELECT id, mensagem, resposta, data_envio FROM mensagens WHERE usuario_id = ? AND resposta IS NOT NULL ORDER BY data_envio DESC`, [req.userId], (err, rows) => {
+        if (err) return res.status(500).json({ erro: "Erro." });
+        res.json({ notificacoes: rows });
+    });
 });
 
 // --- ADMINISTRAÇÃO ---
 const SENHA_ADMIN = "ComandoGame123";
-
 app.post('/api/admin/login', (req, res) => {
     if (req.body.senha !== SENHA_ADMIN) return res.status(401).json({ erro: "Chave incorreta." });
     const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '2h' });
     res.json({ token });
 });
-
 function verificarAdmin(req, res, next) {
     const token = req.headers['authorization']?.split(' ')[1];
     if (!token) return res.status(401).json({ erro: "Acesso negado." });
     jwt.verify(token, JWT_SECRET, (err) => { if (err) return res.status(403).json({ erro: "Sessão expirada." }); next(); });
 }
-
 app.post('/api/admin/usuarios', verificarAdmin, (req, res) => {
     db.all(`SELECT id, codigo_conta, nome, email, saldo, banido, ip, visitor_id, plano_ativo, tempo_restante FROM usuarios`, [], (err, rows) => res.json({ usuarios: rows }));
 });
-
 app.post('/api/admin/saldo', verificarAdmin, (req, res) => {
     db.run(`UPDATE usuarios SET saldo = saldo + ? WHERE id = ?`, [req.body.valor, req.body.idUsuario], () => res.json({ mensagem: "Saldo atualizado!" }));
 });
-
 app.post('/api/admin/banir', verificarAdmin, (req, res) => {
     const status = req.body.banir ? 1 : 0;
     db.get(`SELECT ip, visitor_id FROM usuarios WHERE id = ?`, [req.body.idUsuario], (err, row) => {
@@ -216,18 +184,20 @@ app.post('/api/admin/banir', verificarAdmin, (req, res) => {
         });
     });
 });
-
 app.post('/api/admin/tempo', verificarAdmin, (req, res) => {
     const { idUsuario, minutos, plano } = req.body;
     if (minutos === 0) db.run(`UPDATE usuarios SET tempo_restante = 0, plano_ativo = 'Nenhum' WHERE id = ?`, [idUsuario], () => res.json({ mensagem: "Zerado!" }));
     else db.run(`UPDATE usuarios SET tempo_restante = tempo_restante + ?, plano_ativo = ? WHERE id = ?`, [minutos, plano, idUsuario], () => res.json({ mensagem: "Tempo adicionado!" }));
 });
-
-// ROTA PARA O ADMIN LER AS MENSAGENS
 app.post('/api/admin/mensagens', verificarAdmin, (req, res) => {
-    db.all(`SELECT * FROM mensagens ORDER BY data_envio DESC`, [], (err, rows) => {
-        if (err) return res.status(500).json({ erro: "Erro ao buscar mensagens." });
-        res.json({ mensagens: rows });
+    db.all(`SELECT * FROM mensagens ORDER BY data_envio DESC`, [], (err, rows) => res.json({ mensagens: rows }));
+});
+// NOVA ROTA: ADMIN RESPONDE MENSAGEM
+app.post('/api/admin/responder', verificarAdmin, (req, res) => {
+    const { idMensagem, resposta } = req.body;
+    db.run(`UPDATE mensagens SET resposta = ?, lida = 1 WHERE id = ?`, [resposta, idMensagem], function(err) {
+        if (err) return res.status(500).json({ erro: "Erro ao responder." });
+        res.json({ mensagem: "Resposta enviada com sucesso!" });
     });
 });
 
@@ -235,9 +205,6 @@ app.post('/api/admin/mensagens', verificarAdmin, (req, res) => {
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, '../')));
+io.on('connection', (socket) => { socket.on('iniciar_maquina', () => setTimeout(() => socket.emit('maquina_pronta'), 3000)); });
 
-io.on('connection', (socket) => {
-    socket.on('iniciar_maquina', () => setTimeout(() => socket.emit('maquina_pronta'), 3000));
-});
-
-server.listen(3000, () => console.log('🛡️ Servidor BIG-Room rodando em http://localhost:3000'));
+server.listen(3000, () => console.log('🛡️ Servidor rodando na porta 3000'));
