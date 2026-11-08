@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
 const cors = require('cors');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 
@@ -17,7 +18,7 @@ app.use(express.json());
 app.use(helmet({ contentSecurityPolicy: false })); 
 app.disable('x-powered-by');
 
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 50, message: "Muitas requisições." });
+const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: "Muitas requisições." });
 app.use('/api/', limiter);
 
 // --- BANCO DE DADOS ---
@@ -29,7 +30,8 @@ const db = new sqlite3.Database('./bigroom.db', (err) => {
             nome TEXT NOT NULL,
             email TEXT UNIQUE NOT NULL,
             senha TEXT NOT NULL,
-            saldo REAL DEFAULT 0.00
+            saldo REAL DEFAULT 0.00,
+            banido INTEGER DEFAULT 0
         )`);
     }
 });
@@ -58,6 +60,10 @@ app.post('/api/login', (req, res) => {
     db.get(`SELECT * FROM usuarios WHERE email = ?`, [email], async (err, usuario) => {
         if (err || !usuario) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
         
+        if (usuario.banido === 1) {
+            return res.status(403).json({ erro: "Sua conta foi banida por violar os termos de uso do BIG-Room." });
+        }
+
         const senhaValida = await bcrypt.compare(senha, usuario.senha);
         if (!senhaValida) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
         
@@ -65,25 +71,54 @@ app.post('/api/login', (req, res) => {
     });
 });
 
-app.get('/api/saldo/:id', (req, res) => {
-    db.get(`SELECT saldo FROM usuarios WHERE id = ?`, [req.params.id], (err, row) => {
-        if (err || !row) return res.status(404).json({ erro: "Usuário não encontrado." });
-        res.json({ saldo: row.saldo });
+// --- SISTEMA DE SEGURANÇA DO ADMIN (JWT) ---
+const JWT_SECRET = "bigroom_chave_secreta_super_segura_2026";
+const SENHA_ADMIN_CRIACAO = "ComandoGame123";
+
+app.post('/api/admin/login', (req, res) => {
+    const { senha } = req.body;
+    if (senha !== SENHA_ADMIN_CRIACAO) {
+        return res.status(401).json({ erro: "Chave de acesso incorreta." });
+    }
+    const token = jwt.sign({ role: 'admin', nome: 'ComandoGame' }, JWT_SECRET, { expiresIn: '2h' });
+    res.json({ mensagem: "Acesso liberado", token: token });
+});
+
+function verificarToken(req, res, next) {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) return res.status(401).json({ erro: "Acesso negado. Token não fornecido." });
+
+    jwt.verify(token, JWT_SECRET, (err, decoded) => {
+        if (err) return res.status(403).json({ erro: "Sessão expirada ou Token inválido." });
+        req.admin = decoded;
+        next(); 
+    });
+}
+
+// --- ROTAS PROTEGIDAS ---
+app.post('/api/admin/usuarios', verificarToken, (req, res) => {
+    db.all(`SELECT id, nome, email, saldo, banido FROM usuarios`, [], (err, rows) => {
+        if (err) return res.status(500).json({ erro: "Erro ao buscar usuários." });
+        res.json({ usuarios: rows });
     });
 });
 
-// --- ROTA SECRETA DO ADMINISTRADOR ---
-app.post('/api/admin/usuarios', (req, res) => {
-    const { senhaAdmin } = req.body;
-    
-    // A SUA SENHA DE ADMINISTRADOR AQUI:
-    if (senhaAdmin !== "ComandoGame123") {
-        return res.status(403).json({ erro: "Acesso negado. Chave incorreta." });
-    }
+app.post('/api/admin/saldo', verificarToken, (req, res) => {
+    const { idUsuario, valor } = req.body;
+    db.run(`UPDATE usuarios SET saldo = saldo + ? WHERE id = ?`, [valor, idUsuario], function(err) {
+        if (err) return res.status(500).json({ erro: "Erro ao atualizar saldo." });
+        res.json({ mensagem: "Saldo atualizado com sucesso!" });
+    });
+});
 
-    db.all(`SELECT id, nome, email, saldo FROM usuarios`, [], (err, rows) => {
-        if (err) return res.status(500).json({ erro: "Erro ao buscar usuários." });
-        res.json({ usuarios: rows });
+app.post('/api/admin/banir', verificarToken, (req, res) => {
+    const { idUsuario, banir } = req.body;
+    const statusBanido = banir ? 1 : 0;
+    db.run(`UPDATE usuarios SET banido = ? WHERE id = ?`, [statusBanido, idUsuario], function(err) {
+        if (err) return res.status(500).json({ erro: "Erro ao banir usuário." });
+        res.json({ mensagem: banir ? "Usuário banido!" : "Usuário desbanido!" });
     });
 });
 
@@ -93,7 +128,6 @@ const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, '../')));
 
 io.on('connection', (socket) => {
-    console.log('Jogador conectado:', socket.id);
     socket.on('iniciar_maquina', () => {
         setTimeout(() => {
             socket.emit('maquina_pronta', { ip: '127.0.0.1', porta: '47989' });
@@ -102,5 +136,5 @@ io.on('connection', (socket) => {
 });
 
 server.listen(3000, () => {
-    console.log('🛡️ Servidor BIG-Room rodando em http://localhost:3000');
+    console.log('🛡️ Servidor BIG-Room com JWT rodando em http://localhost:3000');
 });
