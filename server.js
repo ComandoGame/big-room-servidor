@@ -8,6 +8,10 @@ const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
 
 const app = express();
+
+// --- CORREÇÃO DO ERRO NO RENDER ---
+app.set('trust proxy', 1); // Permite que o Render identifique o IP real do usuário
+
 app.use(express.json()); 
 
 // --- SEGURANÇA ---
@@ -67,7 +71,7 @@ app.get('/api/saldo/:id', (req, res) => {
     });
 });
 
-// --- JOGO (SOCKET) ---
+// --- SERVIDOR E SOCKET.IO (Jogo) ---
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, '../')));
