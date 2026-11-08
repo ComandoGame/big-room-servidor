@@ -22,13 +22,11 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.disable('x-powered-by');
 
 // --- CONFIGURAÇÃO DE CHAVES DE API ---
-// COLOQUE AS SUAS CHAVES AQUI (Depois de criar as contas)
-const FP_SECRET_API_KEY = "SUA_SECRET_KEY_FINGERPRINT_AQUI"; 
-const IPQS_API_KEY = "SUA_CHAVE_IPQS_AQUI"; 
+const FP_SECRET_API_KEY = "sk_live_SUA_CHAVE_SECRETA_AQUI"; // <-- COLOQUE A CHAVE sk_ AQUI
+const IPQS_API_KEY = "SUA_CHAVE_IPQS_AQUI"; // <-- OPCIONAL
 
 const fpClient = new FingerprintServerApiClient({ apiKey: FP_SECRET_API_KEY, region: Region.Global });
 
-// Limiter para evitar spam de requisições
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
 app.use('/api/', limiter);
 
@@ -65,7 +63,7 @@ function checarHardwareBanido(visitorId) {
 }
 
 async function checarIPSuspeito(ip) {
-    if (IPQS_API_KEY === "SUA_CHAVE_IPQS_AQUI") return false; 
+    if (IPQS_API_KEY === "SUA_CHAVE_IPQS_AQUI" || !IPQS_API_KEY) return false; 
     try {
         const response = await axios.get(`https://ipqualityscore.com/api/json/ip/${IPQS_API_KEY}/${ip}`);
         return (response.data.proxy || response.data.vpn || response.data.tor);
@@ -86,15 +84,12 @@ app.post('/api/cadastro', async (req, res) => {
 
     if (!nome || !email || !senha) return res.status(400).json({ erro: "Preencha todos os campos." });
 
-    // 1. Verifica IP Banido
     db.get(`SELECT ip FROM banidos_ip WHERE ip = ?`, [ip], async (err, ipRow) => {
         if (ipRow) return res.status(403).json({ erro: "Seu IP está bloqueado no BIG-Room." });
 
-        // 2. Verifica Hardware Banido
         const hardwareBanido = await checarHardwareBanido(visitorId);
         if (hardwareBanido) return res.status(403).json({ erro: "Este dispositivo está permanentemente suspenso." });
 
-        // 3. Verifica VPN (IPQS)
         const ipSuspeito = await checarIPSuspeito(ip);
         if (ipSuspeito) return res.status(403).json({ erro: "O uso de VPN/Proxy é proibido para criar contas." });
 
@@ -252,5 +247,5 @@ io.on('connection', (socket) => {
 });
 
 server.listen(3000, () => {
-    console.log('🛡️ Servidor BIG-Room BLINDADO com Fingerprint rodando em http://localhost:3000');
+    console.log('🛡️ Servidor BIG-Room BLINDADO rodando em http://localhost:3000');
 });
