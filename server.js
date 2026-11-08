@@ -11,15 +11,34 @@ const jwt = require('jsonwebtoken');
 
 const app = express();
 app.set('trust proxy', 1);
-app.use(cors()); 
-app.use(express.json()); 
-app.use(helmet({ contentSecurityPolicy: false })); 
+
+// --- SEGURANÇA EXTREMA (CORS e Helmet) ---
+app.use(cors({ 
+    origin: ['https://big-room-site.onrender.com', 'http://127.0.0.1:5500', 'http://localhost:5500'],
+    methods: ['GET', 'POST']
+})); 
+
+app.use(express.json({ limit: '10kb' })); 
+
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.socket.io"],
+            styleSrc: ["'self'", "'unsafe-inline'"],
+            imgSrc: ["'self'", "data:", "https:"],
+            connectSrc: ["'self'", "https://big-room-servidor.onrender.com", "wss://big-room-servidor.onrender.com"]
+        }
+    },
+    crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
+
 app.disable('x-powered-by');
 
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
+const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: "Muitas requisições." });
 app.use('/api/', limiter);
 
-// --- BANCO DE DADOS (Com IP, Plano e Tempo) ---
+// --- BANCO DE DADOS ---
 const db = new sqlite3.Database('./bigroom.db', (err) => {
     if (!err) {
         console.log("📦 Banco de dados conectado.");
@@ -38,7 +57,6 @@ const db = new sqlite3.Database('./bigroom.db', (err) => {
     }
 });
 
-// Controle de IP (1 conta por semana)
 const ipsCadastrados = new Map(); 
 
 function gerarCodigo() {
@@ -63,7 +81,6 @@ app.post('/api/cadastro', async (req, res) => {
         return res.status(400).json({ erro: "Por favor, use um e-mail válido (Gmail, Hotmail, Outlook, etc)." });
     }
 
-    // Bloqueio de 1 conta por semana por IP
     const ultimoCadastro = ipsCadastrados.get(ip);
     if (ultimoCadastro && (Date.now() - ultimoCadastro < 7 * 24 * 60 * 60 * 1000)) {
         return res.status(429).json({ erro: "Você já criou uma conta recentemente. Aguarde 7 dias." });
@@ -80,15 +97,10 @@ app.post('/api/cadastro', async (req, res) => {
                     if (err.message.includes('UNIQUE constraint failed: usuarios.email')) {
                         return res.status(400).json({ erro: "Este e-mail já está cadastrado." });
                     }
-                    return res.status(500).json({ erro: "Erro interno ao criar conta." });
+                    return res.status(500).json({ erro: "Erro interno." });
                 }
-                
                 ipsCadastrados.set(ip, Date.now());
-
-                res.json({ 
-                    mensagem: "Cadastro realizado!", 
-                    usuario: { id: this.lastID, codigo_conta: codigoConta, nome, saldo: 5.00 } 
-                });
+                res.json({ mensagem: "Cadastro realizado!", usuario: { id: this.lastID, codigo_conta: codigoConta, nome, saldo: 5.00 } });
             }
         );
     } catch (error) {
@@ -105,17 +117,7 @@ app.post('/api/login', (req, res) => {
         const senhaValida = await bcrypt.compare(senha, usuario.senha);
         if (!senhaValida) return res.status(401).json({ erro: "E-mail ou senha incorretos." });
         
-        res.json({ 
-            mensagem: "Login realizado!", 
-            usuario: { 
-                id: usuario.id, 
-                codigo_conta: usuario.codigo_conta, 
-                nome: usuario.nome, 
-                saldo: usuario.saldo,
-                plano_ativo: usuario.plano_ativo,
-                tempo_restante: usuario.tempo_restante
-            } 
-        });
+        res.json({ mensagem: "Login realizado!", usuario: { id: usuario.id, codigo_conta: usuario.codigo_conta, nome: usuario.nome, saldo: usuario.saldo, plano_ativo: usuario.plano_ativo, tempo_restante: usuario.tempo_restante } });
     });
 });
 
@@ -135,13 +137,13 @@ app.post('/api/descontar', (req, res) => {
         
         const novoSaldo = user.saldo - valor;
         db.run(`UPDATE usuarios SET saldo = ? WHERE id = ?`, [novoSaldo, idUsuario], function(err) {
-            if (err) return res.status(500).json({ erro: "Erro ao descontar." });
+            if (err) return res.status(500).json({ erro: "Erro." });
             res.json({ mensagem: "Pagamento aprovado!", novoSaldo: novoSaldo });
         });
     });
 });
 
-// --- ROTAS DO ADMINISTRADOR ---
+// --- ADMIN ---
 const JWT_SECRET = "bigroom_chave_secreta_super_segura_2026";
 const SENHA_ADMIN_CRIACAO = "ComandoGame123";
 
@@ -164,7 +166,7 @@ function verificarToken(req, res, next) {
 
 app.post('/api/admin/usuarios', verificarToken, (req, res) => {
     db.all(`SELECT id, codigo_conta, nome, email, saldo, banido, ip, plano_ativo, tempo_restante FROM usuarios`, [], (err, rows) => {
-        if (err) return res.status(500).json({ erro: "Erro ao buscar." });
+        if (err) return res.status(500).json({ erro: "Erro." });
         res.json({ usuarios: rows });
     });
 });
@@ -172,7 +174,7 @@ app.post('/api/admin/usuarios', verificarToken, (req, res) => {
 app.post('/api/admin/saldo', verificarToken, (req, res) => {
     const { idUsuario, valor } = req.body;
     db.run(`UPDATE usuarios SET saldo = saldo + ? WHERE id = ?`, [valor, idUsuario], function(err) {
-        if (err) return res.status(500).json({ erro: "Erro ao atualizar." });
+        if (err) return res.status(500).json({ erro: "Erro." });
         res.json({ mensagem: "Saldo atualizado!" });
     });
 });
@@ -181,8 +183,8 @@ app.post('/api/admin/banir', verificarToken, (req, res) => {
     const { idUsuario, banir } = req.body;
     const statusBanido = banir ? 1 : 0;
     db.run(`UPDATE usuarios SET banido = ? WHERE id = ?`, [statusBanido, idUsuario], function(err) {
-        if (err) return res.status(500).json({ erro: "Erro ao banir." });
-        res.json({ mensagem: banir ? "Usuário banido!" : "Usuário desbanido!" });
+        if (err) return res.status(500).json({ erro: "Erro." });
+        res.json({ mensagem: banir ? "Banido!" : "Desbanido!" });
     });
 });
 
@@ -190,13 +192,13 @@ app.post('/api/admin/tempo', verificarToken, (req, res) => {
     const { idUsuario, minutos, plano } = req.body;
     if (minutos === 0) {
         db.run(`UPDATE usuarios SET tempo_restante = 0, plano_ativo = 'Nenhum' WHERE id = ?`, [idUsuario], function(err) {
-            if (err) return res.status(500).json({ erro: "Erro ao remover tempo." });
-            res.json({ mensagem: "Sessão encerrada e tempo removido!" });
+            if (err) return res.status(500).json({ erro: "Erro." });
+            res.json({ mensagem: "Sessão encerrada!" });
         });
     } else {
         db.run(`UPDATE usuarios SET tempo_restante = tempo_restante + ?, plano_ativo = ? WHERE id = ?`, [minutos, plano, idUsuario], function(err) {
-            if (err) return res.status(500).json({ erro: "Erro ao adicionar tempo." });
-            res.json({ mensagem: `Adicionado ${minutos} minutos ao usuário!` });
+            if (err) return res.status(500).json({ erro: "Erro." });
+            res.json({ mensagem: `Adicionado ${minutos} min!` });
         });
     }
 });
@@ -215,5 +217,5 @@ io.on('connection', (socket) => {
 });
 
 server.listen(3000, () => {
-    console.log('🛡️ Servidor BIG-Room com Controle Total rodando em http://localhost:3000');
+    console.log('🛡️ Servidor BIG-Room BLINDADO rodando em http://localhost:3000');
 });
