@@ -22,6 +22,7 @@ app.use(cookieParser());
 app.use(helmet({ contentSecurityPolicy: false }));
 app.disable('x-powered-by');
 
+// CONFIGURAÇÃO DE CHAVES
 const FP_SECRET_API_KEY = "COLE_SUA_SECRET_KEY_AQUI"; 
 const JWT_SECRET = "bigroom_chave_secreta_super_segura_2026";
 const fpClient = new FingerprintServerApiClient({ apiKey: FP_SECRET_API_KEY, region: Region.Global });
@@ -32,7 +33,6 @@ app.use('/api/', limiter);
 // --- BANCO DE DADOS ---
 const db = new sqlite3.Database('./bigroom.db', (err) => {
     if (!err) {
-        console.log("📦 Banco de dados conectado.");
         db.run(`CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT, codigo_conta TEXT UNIQUE, nome TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
             senha TEXT NOT NULL, saldo REAL DEFAULT 0.00, banido INTEGER DEFAULT 0, ip TEXT DEFAULT 'Desconhecido', visitor_id TEXT DEFAULT 'Desconhecido',
@@ -40,13 +40,14 @@ const db = new sqlite3.Database('./bigroom.db', (err) => {
         )`);
         db.run(`CREATE TABLE IF NOT EXISTS banidos_ip (ip TEXT PRIMARY KEY)`);
         db.run(`CREATE TABLE IF NOT EXISTS banidos_hardware (visitor_id TEXT PRIMARY KEY)`);
-        // NOVA TABELA DE MENSAGENS COM RESPOSTA
-        db.run(`CREATE TABLE IF NOT EXISTS mensagens (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER, nome TEXT, email TEXT, mensagem TEXT, resposta TEXT, lida INTEGER DEFAULT 0, data_envio DATETIME DEFAULT CURRENT_TIMESTAMP
+        // TABELA DE CHAT (CONVERSAS)
+        db.run(`CREATE TABLE IF NOT EXISTS conversas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER, remetente TEXT, mensagem TEXT, data_envio DATETIME DEFAULT CURRENT_TIMESTAMP
         )`);
     }
 });
 
+// --- FUNÇÕES AUXILIARES ---
 function gerarCodigo() { return 'BR-' + Math.random().toString(36).substring(2, 7).toUpperCase(); }
 function gerarTokenEEnviarCookie(res, usuario) {
     const token = jwt.sign({ id: usuario.id, role: 'user' }, JWT_SECRET, { expiresIn: '7d' });
@@ -130,24 +131,20 @@ app.post('/api/descontar', autenticarUser, (req, res) => {
     });
 });
 
-app.post('/api/contato', (req, res) => {
-    const { nome, email, mensagem } = req.body;
-    let usuarioId = null;
-    if (req.cookies.bigroom_token) {
-        try { usuarioId = jwt.verify(req.cookies.bigroom_token, JWT_SECRET).id; } catch (e) {}
-    }
-    if (!nome || !email || !mensagem) return res.status(400).json({ erro: "Preencha todos os campos." });
-    db.run(`INSERT INTO mensagens (usuario_id, nome, email, mensagem) VALUES (?, ?, ?, ?)`, [usuarioId, nome, email, mensagem], function(err) {
-        if (err) return res.status(500).json({ erro: "Erro interno." });
-        res.json({ mensagem: "Mensagem enviada!" });
+// --- SISTEMA DE CHAT (CONTATO) ---
+app.post('/api/contato', autenticarUser, (req, res) => {
+    const { mensagem } = req.body;
+    if (!mensagem) return res.status(400).json({ erro: "Escreva uma mensagem." });
+    db.run(`INSERT INTO conversas (usuario_id, remetente, mensagem) VALUES (?, 'user', ?)`, [req.userId, mensagem], function(err) {
+        if (err) return res.status(500).json({ erro: "Erro ao salvar." });
+        res.json({ mensagem: "Enviado!" });
     });
 });
 
-// --- ROTA DE NOTIFICAÇÕES DO USUÁRIO ---
-app.get('/api/notificacoes', autenticarUser, (req, res) => {
-    db.all(`SELECT id, mensagem, resposta, data_envio FROM mensagens WHERE usuario_id = ? AND resposta IS NOT NULL ORDER BY data_envio DESC`, [req.userId], (err, rows) => {
+app.get('/api/minhas-mensagens', autenticarUser, (req, res) => {
+    db.all(`SELECT remetente, mensagem, data_envio FROM conversas WHERE usuario_id = ? ORDER BY data_envio ASC`, [req.userId], (err, rows) => {
         if (err) return res.status(500).json({ erro: "Erro." });
-        res.json({ notificacoes: rows });
+        res.json({ conversas: rows });
     });
 });
 
@@ -189,15 +186,19 @@ app.post('/api/admin/tempo', verificarAdmin, (req, res) => {
     if (minutos === 0) db.run(`UPDATE usuarios SET tempo_restante = 0, plano_ativo = 'Nenhum' WHERE id = ?`, [idUsuario], () => res.json({ mensagem: "Zerado!" }));
     else db.run(`UPDATE usuarios SET tempo_restante = tempo_restante + ?, plano_ativo = ? WHERE id = ?`, [minutos, plano, idUsuario], () => res.json({ mensagem: "Tempo adicionado!" }));
 });
-app.post('/api/admin/mensagens', verificarAdmin, (req, res) => {
-    db.all(`SELECT * FROM mensagens ORDER BY data_envio DESC`, [], (err, rows) => res.json({ mensagens: rows }));
+
+// NOVAS ROTAS DO ADMIN PARA O CHAT
+app.post('/api/admin/conversas', verificarAdmin, (req, res) => {
+    db.all(`SELECT c.*, u.nome FROM conversas c JOIN usuarios u ON c.usuario_id = u.id ORDER BY c.data_envio ASC`, [], (err, rows) => {
+        if (err) return res.status(500).json({ erro: "Erro." });
+        res.json({ conversas: rows });
+    });
 });
-// NOVA ROTA: ADMIN RESPONDE MENSAGEM
 app.post('/api/admin/responder', verificarAdmin, (req, res) => {
-    const { idMensagem, resposta } = req.body;
-    db.run(`UPDATE mensagens SET resposta = ?, lida = 1 WHERE id = ?`, [resposta, idMensagem], function(err) {
+    const { idUsuario, mensagem } = req.body;
+    db.run(`INSERT INTO conversas (usuario_id, remetente, mensagem) VALUES (?, 'admin', ?)`, [idUsuario, mensagem], function(err) {
         if (err) return res.status(500).json({ erro: "Erro ao responder." });
-        res.json({ mensagem: "Resposta enviada com sucesso!" });
+        res.json({ mensagem: "Resposta enviada!" });
     });
 });
 
@@ -207,4 +208,4 @@ const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, '../')));
 io.on('connection', (socket) => { socket.on('iniciar_maquina', () => setTimeout(() => socket.emit('maquina_pronta'), 3000)); });
 
-server.listen(3000, () => console.log('🛡️ Servidor rodando na porta 3000'));
+server.listen(3000, () => console.log('🛡️ Servidor com Chat rodando na porta 3000'));
